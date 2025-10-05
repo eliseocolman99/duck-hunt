@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mini Duck Hunt — JS + Canvas</title>
+  <style>
+    :root{
+      --bg:#0a0f1c;
+      --panel:#0f172a;
+      --text:#e5e7eb;
+      --accent:#22d3ee;
+      --good:#22c55e;
+      --bad:#ef4444;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;
+      background:linear-gradient(180deg,#0ea5e9 0%, #60a5fa 60%, #16a34a 60.1%, #14532d 100%);
+      display:grid; place-items:center; color:var(--text);
+    }
+    .wrap{width:min(920px,96vw); position:relative;}
+    header{display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px}
+    h1{font-size:20px; margin:0; letter-spacing:.5px}
+    .hud{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+    .pill{background:rgba(15,23,42,.55); padding:8px 12px; border-radius:999px; box-shadow:0 4px 14px rgba(0,0,0,.2);}
+    .btn{cursor:pointer; border:none; border-radius:12px; padding:10px 18px; background:var(--accent); color:#042b2f; font-weight:700; box-shadow:0 8px 20px rgba(0,0,0,.25); transition:transform .15s;}
+    .btn:active{transform:translateY(1px)}
+    #game{display:block; width:100%; aspect-ratio:16/9; border-radius:16px; background:transparent; box-shadow:0 20px 60px rgba(0,0,0,.35);}
+    .note{opacity:.85; font-size:14px; margin-top:8px; text-align:center}
+    .menu-overlay{
+      position:absolute; inset:0; background:rgba(15,23,42,.85); display:flex; flex-direction:column;
+      align-items:center; justify-content:center; border-radius:16px; backdrop-filter:blur(4px);
+      transition:opacity .4s; z-index:10; text-align:center; padding:20px;
+    }
+    .menu-overlay h2{font-size:28px; margin-bottom:20px;}
+    .menu-overlay p{font-size:18px; margin:10px 0 20px; max-width:360px; line-height:1.4;}
+    .menu-overlay.hidden{opacity:0; pointer-events:none;}
+    .toasts{position:fixed; top:14px; right:14px; display:grid; gap:8px}
+    .toast{padding:10px 14px; border-radius:12px; background:rgba(15,23,42,.9); border:1px solid rgba(255,255,255,.06)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>🦆 Mini Duck Hunt — Canvas</h1>
+      <div class="hud">
+        <div class="pill">Puntos: <strong id="score">0</strong></div>
+        <div class="pill">Ronda: <strong id="round">1</strong></div>
+        <div class="pill">Balas: <strong id="ammo">3</strong></div>
+        <button class="btn" id="restart">Reiniciar</button>
+      </div>
+    </header>
+    <canvas id="game" width="1280" height="720" aria-label="Duck Hunt"></canvas>
+    <div class="note">PC: mueve el mouse y haz clic para disparar • Móvil: toca la pantalla</div>
+
+    <!-- Menú de inicio -->
+    <div class="menu-overlay" id="menuInicio">
+      <h2>🕹️ Mini Duck Hunt</h2>
+      <p>Prepárate para poner a prueba tu puntería. ¿Listo para cazar algunos patos?</p>
+      <button class="btn" id="btnJugar">Empezar juego</button>
+    </div>
+
+    <!-- Menú de perdiste -->
+    <div class="menu-overlay hidden" id="menuPerdiste">
+      <h2>💀 ¡Perdiste!</h2>
+      <p id="mensajePerdiste">Lograste una puntuación de 0 puntos. ¡No te rindas, vuelve a intentarlo y demuestra tu puntería! 🎯</p>
+      <button class="btn" id="btnReintentar">🔁 Reintentar</button>
+    </div>
+  </div>
+  <div class="toasts" id="toasts"></div>
+
+  <script>
+    const $ = (sel)=>document.querySelector(sel);
+    const scoreEl = $('#score');
+    const ammoEl = $('#ammo');
+    const roundEl = $('#round');
+    const toasts = $('#toasts');
+    const menuInicio = $('#menuInicio');
+    const menuPerdiste = $('#menuPerdiste');
+    const btnJugar = $('#btnJugar');
+    const btnReintentar = $('#btnReintentar');
+    const mensajePerdiste = $('#mensajePerdiste');
+
+    const toast = (msg)=>{
+      const d = document.createElement('div');
+      d.className = 'toast';
+      d.textContent = msg;
+      toasts.appendChild(d);
+      setTimeout(()=>{ d.remove(); }, 1600);
+    };
+
+    let audioCtx;
+    function beep(type='square', freq=440, dur=0.08, gain=0.02){
+      if(!audioCtx){ audioCtx = new (window.AudioContext||window.webkitAudioContext)(); }
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = type; o.frequency.value = freq; g.gain.value = gain;
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(); o.stop(audioCtx.currentTime + dur);
+    }
+    const sfx = {
+      shot: ()=>beep('square', 220, 0.05, 0.06),
+      hit: ()=>{ beep('square', 660, 0.04, 0.04); setTimeout(()=>beep('square', 520, 0.06, 0.04), 50); },
+      miss: ()=>beep('sawtooth', 140, 0.08, 0.03),
+      round: ()=>beep('triangle', 880, 0.12, 0.03)
+    };
+
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    const GAME = {
+      width: canvas.width,
+      height: canvas.height,
+      running: false,
+      score: 0,
+      ammo: 3,
+      round: 1,
+      duckSpeed: 2.5,
+      duckRadius: 30,
+      crosshair: {x: canvas.width/2, y: canvas.height/2},
+      skyHue: 205
+    };
+
+    const duck = { x:100, y:100, vx:2, vy:1.4, alive:true, falling:false, t:0, escapeTimer:0 };
+
+    function rand(min,max){ return Math.random()*(max-min)+min; }
+    function clamp(v,a,b){ return Math.max(a, Math.min(b,v)); }
+
+    function spawnDuck(){
+      duck.x = rand(120, GAME.width-120);
+      duck.y = rand(140, GAME.height*0.6);
+      const ang = rand(0, Math.PI*2);
+      duck.vx = Math.cos(ang) * GAME.duckSpeed;
+      duck.vy = Math.sin(ang) * GAME.duckSpeed*0.8;
+      duck.alive = true; duck.falling = false; duck.t = 0; duck.escapeTimer = 0;
+    }
+
+    function resetRound(next=false){
+      if(next){ GAME.round++; GAME.duckSpeed *= 1.08; }
+      GAME.ammo = 3;
+      spawnDuck();
+      roundEl.textContent = GAME.round;
+      ammoEl.textContent = GAME.ammo;
+      sfx.round();
+    }
+
+    canvas.addEventListener('mousemove', (e)=>{
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      GAME.crosshair.x = (e.clientX - rect.left) * scaleX;
+      GAME.crosshair.y = (e.clientY - rect.top) * scaleY;
+    });
+
+    function shoot(x,y){
+      if(!GAME.running) return;
+      if(GAME.ammo <= 0) { toast('Sin balas!'); sfx.miss(); return; }
+      GAME.ammo--; ammoEl.textContent = GAME.ammo; sfx.shot();
+      const dx = x - duck.x;
+      const dy = y - duck.y;
+      const hit = Math.hypot(dx,dy) <= GAME.duckRadius*0.9 && duck.alive && !duck.falling;
+      if(hit){
+        duck.falling = true; duck.alive = false; sfx.hit();
+        GAME.score += 100 * GAME.round; scoreEl.textContent = GAME.score;
+        toast('¡Le diste! +'+(100*GAME.round));
+      } else {
+        sfx.miss();
+      }
+
+      if(GAME.ammo === 0 && !duck.falling){
+        GAME.running = false;
+        mensajePerdiste.textContent = `Lograste una puntuación de ${GAME.score} puntos. ¡No te rindas, vuelve a intentarlo y demuestra tu puntería! 🎯`;
+        menuPerdiste.classList.remove('hidden');
+      }
+    }
+
+    canvas.addEventListener('click', (e)=>{
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const x = (e.clientX - rect.left) * scaleX;
+      const y = (e.clientY - rect.top) * scaleY;
+      shoot(x,y);
+    });
+
+    document.getElementById('restart').addEventListener('click', ()=>{
+      GAME.score = 0; scoreEl.textContent = 0;
+      GAME.round = 1; roundEl.textContent = 1;
+      GAME.duckSpeed = 2.5;
+      resetRound();
+    });
+
+    function drawBackground(){
+      const g = ctx.createLinearGradient(0,0,0,GAME.height);
+      g.addColorStop(0, `hsl(${GAME.skyHue}, 80%, 65%)`);
+      g.addColorStop(0.6, `hsl(${GAME.skyHue+15}, 70%, 58%)`);
+      g.addColorStop(0.601, `#2f9e44`);
+      g.addColorStop(1, `#14532d`);
+      ctx.fillStyle = g; ctx.fillRect(0,0,GAME.width,GAME.height);
+    }
+
+    function drawDuck(){
+      ctx.save();
+      ctx.translate(duck.x, duck.y);
+      const flap = Math.sin(duck.t*10) * 10 + 12;
+      ctx.globalAlpha = 0.25;
+      ctx.beginPath();
+      ctx.ellipse(-6, GAME.duckRadius*0.9, GAME.duckRadius*0.8, 10, 0, 0, Math.PI*2);
+      ctx.fillStyle = '#000'; ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#0f172a';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, GAME.duckRadius, GAME.duckRadius*0.7, 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.fillStyle = '#1e293b';
+      ctx.beginPath();
+      ctx.arc(GAME.duckRadius*0.8, -8, GAME.duckRadius*0.35, 0, Math.PI*2);
+      ctx.fill();
+      ctx.fillStyle = '#f59e0b';
+      ctx.beginPath();
+      ctx.moveTo(GAME.duckRadius*1.05, -8);
+      ctx.lineTo(GAME.duckRadius*1.45, -4);
+      ctx.lineTo(GAME.duckRadius*1.05, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#334155';
+      ctx.beginPath();
+      ctx.ellipse(-8, -8 - flap*0.3, GAME.duckRadius*0.5, GAME.duckRadius*0.25, -0.8, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawCrosshair(){
+      const {x,y} = GAME.crosshair;
+      ctx.save();
+      ctx.translate(x,y);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(0,0,0,.5)';
+      ctx.beginPath();
+      ctx.arc(0,0,16,0,Math.PI*2); ctx.moveTo(-22,0); ctx.lineTo(22,0); ctx.moveTo(0,-22); ctx.lineTo(0,22);
+      ctx.stroke();
+      ctx.strokeStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(0,0,14,0,Math.PI*2); ctx.moveTo(-20,0); ctx.lineTo(20,0); ctx.moveTo(0,-20); ctx.lineTo(0,20);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function update(dt){
+      duck.t += dt;
+      duck.escapeTimer += dt;
+      if(duck.alive && !duck.falling){
+        duck.vy += Math.sin(duck.t*2.2) * 0.02;
+        duck.x += duck.vx;
+        duck.y += duck.vy;
+        if(duck.x < 40 || duck.x > GAME.width-40) duck.vx *= -1;
+        if(duck.y < 80 || duck.y > GAME.height*0.75) duck.vy *= -1;
+      }
+      if(duck.falling){
+        duck.vx *= 0.98;
+        duck.vy += 0.28;
+        duck.x += duck.vx;
+        duck.y += duck.vy;
+        if(duck.y > GAME.height - 30){
+          setTimeout(()=>resetRound(true), 450);
+          duck.falling = false;
+        }
+      }
+      GAME.crosshair.x = clamp(GAME.crosshair.x, 0, GAME.width);
+      GAME.crosshair.y = clamp(GAME.crosshair.y, 0, GAME.height);
+    }
+
+    function render(){
+      drawBackground();
+      drawDuck();
+      drawCrosshair();
+      ctx.fillStyle = 'rgba(0,0,0,.25)';
+      ctx.fillRect(12,12,160,68);
+      ctx.fillStyle = '#fff';
+      ctx.font = '16px system-ui, sans-serif';
+      ctx.fillText(`Puntos: ${GAME.score}`, 24, 36);
+      ctx.fillText(`Balas: ${'●'.repeat(GAME.ammo)}${'○'.repeat(3-GAME.ammo)}`, 24, 58);
+    }
+
+    let last=0; resetRound();
+    function loop(ts){
+      const dt = (ts - last)/1000; last = ts;
+      if(GAME.running){ update(dt); render(); }
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    window.addEventListener('keydown', (e)=>{
+      if(e.code === 'Space'){ shoot(GAME.crosshair.x, GAME.crosshair.y); }
+    });
+
+    btnJugar.addEventListener('click', ()=>{
+      menuInicio.classList.add('hidden');
+      GAME.running = true;
+      resetRound();
+    });
+
+    btnReintentar.addEventListener('click', ()=>{
+      menuPerdiste.classList.add('hidden');
+      GAME.score = 0; scoreEl.textContent = 0;
+      GAME.round = 1; roundEl.textContent = 1;
+      GAME.duckSpeed = 2.5;
+      resetRound();
+      GAME.running = true;
+    });
+  </script>
+</body>
+</html>
